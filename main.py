@@ -2,7 +2,7 @@
 """
 Authoritative Host / Game Server + Local Renderer
 
-- Runs the authoritative game and renders it locally with pygame.
+- Runs the authoritative game and renders it locally with pygame-ce.
 - Accepts TCP clients:
   - Controller clients: send placement/buy/upgrade/start/reset commands (text lines).
   - Subscriber clients: send "SUBSCRIBE" and receive newline-delimited JSON state snapshots (~10Hz).
@@ -42,7 +42,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
 
-import pygame
+import pygame-ce
 
 # -------------------------------
 # Configuration / Gameplay Vars
