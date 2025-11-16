@@ -27,7 +27,7 @@ Requirements
 Install
 
 ```bash
-pip install -r requirements.txt  # or: pip install pygame
+pip install pygame
 ```
 
 Quick start — Local (no networking)
