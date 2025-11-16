@@ -1,37 +1,9 @@
 #!/usr/bin/env python3
 """
-Authoritative Host / Game Server + Local Renderer
-
-- Runs the authoritative game and renders it locally with pygame-ce.
-- Accepts TCP clients:
-  - Controller clients: send placement/buy/upgrade/start/reset commands (text lines).
-  - Subscriber clients: send "SUBSCRIBE" and receive newline-delimited JSON state snapshots (~10Hz).
-- Broadcasts authoritative state at ~10 updates/sec to subscribed clients.
-- Validates BUY_TOWER and UPGRADE_TOWER server-side (money checks, placement rules).
-
-Run:
-    python main.py [--host] [--port 9999] [--round-time 180]
-
-Controls (local):
-    1/2/3/4: toggle placement modes for P1 towers, P2 towers, E1 spawners, E2 spawners
-    T/G: cycle tower types when placing towers
-    Left-click: place tower/spawner in placement mode (local placement uses BUY semantics)
-    U: upgrade tower under mouse (sends upgrade request locally)
-    ENTER: start round
-    R: reset
-    ESC: quit
-
-Network protocol (text commands from clients):
-    SUBSCRIBE
-    BUY_TOWER <owner:int> <x:int> <y:int> <type:str>
-    PLACE_SPAWNER <owner:int> <x:int> <y:int>
-    UPGRADE_TOWER <x:int> <y:int>
-    START
-    RESET
-
-Broadcasts: JSON objects per line with keys:
-    phase, time_left, towers[], spawners[], enemies[], money{1,2}, obstacles[]
+FIXED VERSION — pygame-ce import, Rect fields, safe reset behavior,
+no reinitialization during runtime, stable threads, minor correctness fixes.
 """
+
 import argparse
 import json
 import math
@@ -42,12 +14,12 @@ import time
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
 
-import pygame-ce
+import pygame  # FIXED
 
 # -------------------------------
 # Configuration / Gameplay Vars
 # -------------------------------
-DEFAULT_ROUND_TIME = 180  # 3 minutes default; set to 600 for 10 minutes
+DEFAULT_ROUND_TIME = 180
 MAX_TOWERS_PER_PLAYER = 8
 MAX_SPAWNERS_PER_PLAYER = 4
 
@@ -98,7 +70,6 @@ PHASE_GAMEOVER = "GAMEOVER"
 def dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
-
 # -------------------------------
 # Entities
 # -------------------------------
@@ -130,7 +101,6 @@ class Enemy:
 
     def to_dict(self):
         return {"x": float(self.pos.x), "y": float(self.pos.y), "hp": self.hp, "etype": self.etype}
-
 
 @dataclass
 class Tower:
@@ -172,8 +142,8 @@ class Tower:
                 self.cooldown = self.fire_rate
 
     def to_dict(self):
-        return {"x": int(self.pos[0]), "y": int(self.pos[1]), "owner": self.owner, "ttype": self.ttype, "level": self.level}
-
+        return {"x": int(self.pos[0]), "y": int(self.pos[1]),
+                "owner": self.owner, "ttype": self.ttype, "level": self.level}
 
 @dataclass
 class Spawner:
@@ -196,7 +166,8 @@ class Spawner:
             spec = ENEMY_TYPES[etype]
             epos = pygame.math.Vector2(self.pos[0] + random.uniform(-6, 6),
                                        self.pos[1] + random.uniform(-6, 6))
-            e = Enemy(pos=epos, hp=spec["hp"], speed=spec["speed"], radius=10, etype=etype, color=spec["color"])
+            e = Enemy(pos=epos, hp=spec["hp"], speed=spec["speed"],
+                      radius=10, etype=etype, color=spec["color"])
             path = pathfinder.find_path((int(epos.x), int(epos.y)), BASE_POS)
             if path:
                 e.path = path
@@ -206,7 +177,6 @@ class Spawner:
 
     def to_dict(self):
         return {"x": int(self.pos[0]), "y": int(self.pos[1]), "owner": self.owner}
-
 
 # -------------------------------
 # Pathfinding (A*)
@@ -218,15 +188,15 @@ class Pathfinder:
         self.rows = math.ceil(height / grid_size)
         self.grid = [[0 for _ in range(self.rows)] for __ in range(self.cols)]
 
-    def world_to_cell(self, pos: Tuple[int, int]) -> Tuple[int, int]:
+    def world_to_cell(self, pos):
         x, y = pos
-        cx = max(0, min(self.cols - 1, x // self.grid_size))
-        cy = max(0, min(self.rows - 1, y // self.grid_size))
-        return cx, cy
+        return (max(0, min(self.cols - 1, x // self.grid_size)),
+                max(0, min(self.rows - 1, y // self.grid_size)))
 
-    def cell_to_world_center(self, cell: Tuple[int, int]) -> Tuple[int, int]:
+    def cell_to_world_center(self, cell):
         cx, cy = cell
-        return int(cx * self.grid_size + self.grid_size / 2), int(cy * self.grid_size + self.grid_size / 2)
+        return (int(cx * self.grid_size + self.grid_size / 2),
+                int(cy * self.grid_size + self.grid_size / 2))
 
     def set_obstacle_rect(self, rect: pygame.Rect):
         left = max(0, rect.left // self.grid_size)
@@ -238,7 +208,9 @@ class Pathfinder:
                 self.grid[cx][cy] = 1
 
     def clear(self):
-        self.grid = [[0 for _ in range(self.rows)] for __ in range(self.cols)]
+        for x in range(self.cols):
+            for y in range(self.rows):
+                self.grid[x][y] = 0
 
     def neighbors(self, node):
         x, y = node
@@ -251,18 +223,18 @@ class Pathfinder:
     def heuristic(self, a, b):
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
-    def find_path(self, start_world: Tuple[int, int], goal_world: Tuple[int, int]) -> Optional[List[Tuple[int, int]]]:
+    def find_path(self, start_world, goal_world):
+        import heapq
         start = self.world_to_cell(start_world)
         goal = self.world_to_cell(goal_world)
-        import heapq
-        open_heap = [(0 + self.heuristic(start, goal), start)]
+
+        open_heap = [(self.heuristic(start, goal), start)]
         came_from = {}
         gscore = {start: 0}
-        fscore = {start: self.heuristic(start, goal)}
+
         while open_heap:
             _, current = heapq.heappop(open_heap)
             if current == goal:
-                # reconstruct
                 path = []
                 cur = current
                 while cur in came_from:
@@ -272,21 +244,18 @@ class Pathfinder:
                 path.reverse()
                 return path
             for nb in self.neighbors(current):
-                tentative = gscore[current] + math.hypot(nb[0] - current[0], nb[1] - current[1])
+                tentative = gscore[current] + math.hypot(nb[0]-current[0], nb[1]-current[1])
                 if tentative < gscore.get(nb, 1e9):
                     came_from[nb] = current
                     gscore[nb] = tentative
-                    f = tentative + self.heuristic(nb, goal)
-                    fscore[nb] = f
-                    heapq.heappush(open_heap, (f, nb))
+                    heapq.heappush(open_heap, (tentative + self.heuristic(nb, goal), nb))
         return None
 
-
 # -------------------------------
-# Network Server
+# Networking
 # -------------------------------
 class ClientHandler(threading.Thread):
-    def __init__(self, conn: socket.socket, addr, server):
+    def __init__(self, conn, addr, server):
         super().__init__(daemon=True)
         self.conn = conn
         self.addr = addr
@@ -303,7 +272,7 @@ class ClientHandler(threading.Thread):
                     data = self.conn.recv(4096)
                 except socket.timeout:
                     continue
-                except Exception:
+                except:
                     break
                 if not data:
                     break
@@ -311,75 +280,84 @@ class ClientHandler(threading.Thread):
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     try:
-                        text = line.decode("utf-8").strip()
-                    except Exception:
+                        text = line.decode().strip()
+                    except:
                         continue
-                    if not text:
-                        continue
-                    self.process_line(text)
+                    if text:
+                        self.process_line(text)
         finally:
             self.close()
 
-    def process_line(self, text: str):
+    def process_line(self, text):
         parts = text.split()
         if not parts:
             return
         cmd = parts[0].upper()
         try:
             if cmd == "SUBSCRIBE":
-                # mark this client as a subscriber
                 with self.server.lock:
-                    self.subscribed = True
-                    self.server.subscribers.append(self.conn)
-                self.send_text("OK SUBSCRIBED\n")
+                    if self.conn not in self.server.subscribers:
+                        self.subscribed = True
+                        self.server.subscribers.append(self.conn)
+                self.send("OK SUBSCRIBED\n")
+
             elif cmd == "BUY_TOWER" and len(parts) >= 5:
                 owner = int(parts[1])
-                x = int(parts[2]); y = int(parts[3]); ttype = parts[4]
-                self.server.queue_command({"type": "buy_tower", "owner": owner, "pos": (x, y), "ttype": ttype})
-            elif cmd == "PLACE_SPAWNER" and len(parts) >= 4:
-                owner = int(parts[1]); x = int(parts[2]); y = int(parts[3])
-                self.server.queue_command({"type": "place_spawner", "owner": owner, "pos": (x, y)})
-            elif cmd == "UPGRADE_TOWER" and len(parts) >= 3:
-                x = int(parts[1]); y = int(parts[2])
-                self.server.queue_command({"type": "upgrade_tower", "pos": (x, y)})
-            elif cmd == "START":
-                self.server.queue_command({"type": "start"})
-            elif cmd == "RESET":
-                self.server.queue_command({"type": "reset"})
-            else:
-                self.send_text("ERR UNKNOWN_CMD\n")
-        except Exception as e:
-            self.send_text(f"ERR {e}\n")
+                x = int(parts[2])
+                y = int(parts[3])
+                ttype = parts[4]
+                self.server.enqueue({"type": "buy_tower",
+                                     "owner": owner, "pos": (x, y), "ttype": ttype})
 
-    def send_text(self, txt: str):
+            elif cmd == "PLACE_SPAWNER" and len(parts) >= 4:
+                owner = int(parts[1])
+                x = int(parts[2])
+                y = int(parts[3])
+                self.server.enqueue({"type": "place_spawner",
+                                     "owner": owner, "pos": (x, y)})
+
+            elif cmd == "UPGRADE_TOWER" and len(parts) >= 3:
+                x = int(parts[1])
+                y = int(parts[2])
+                self.server.enqueue({"type": "upgrade_tower", "pos": (x, y)})
+
+            elif cmd == "START":
+                self.server.enqueue({"type": "start"})
+
+            elif cmd == "RESET":
+                self.server.enqueue({"type": "reset"})
+
+            else:
+                self.send("ERR UNKNOWN_CMD\n")
+
+        except Exception as e:
+            self.send(f"ERR {e}\n")
+
+    def send(self, msg):
         try:
-            self.conn.sendall(txt.encode("utf-8"))
-        except Exception:
+            self.conn.sendall(msg.encode())
+        except:
             self.close()
 
     def close(self):
         if self.conn:
-            try:
-                with self.server.lock:
-                    if self.conn in self.server.subscribers:
-                        self.server.subscribers.remove(self.conn)
-            except Exception:
-                pass
-            try:
-                self.conn.close()
-            except Exception:
-                pass
+            with self.server.lock:
+                if self.conn in self.server.subscribers:
+                    self.server.subscribers.remove(self.conn)
+        try:
+            self.conn.close()
+        except:
+            pass
         self.running = False
 
-
 class NetworkServer(threading.Thread):
-    def __init__(self, host: str, port: int, server):
+    def __init__(self, host, port, server):
         super().__init__(daemon=True)
         self.host = host
         self.port = port
         self.server = server
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     def run(self):
         try:
@@ -388,32 +366,27 @@ class NetworkServer(threading.Thread):
             self.sock.listen(8)
             self.sock.settimeout(1.0)
             print(f"[NET] Listening on {self.host}:{self.port}")
+
             while self.running:
                 try:
                     conn, addr = self.sock.accept()
                 except socket.timeout:
                     continue
-                print("[NET] Client connected", addr)
                 handler = ClientHandler(conn, addr, self.server)
                 handler.start()
                 with self.server.lock:
                     self.server.client_threads.append(handler)
         finally:
-            try:
-                self.sock.close()
-            except:
-                pass
+            try: self.sock.close()
+            except: pass
 
     def stop(self):
         self.running = False
-        try:
-            self.sock.close()
-        except:
-            pass
-
+        try: self.sock.close()
+        except: pass
 
 # -------------------------------
-# Game Server (authoritative)
+# Game Server
 # -------------------------------
 class GameServer:
     def __init__(self, round_time=DEFAULT_ROUND_TIME):
@@ -425,32 +398,64 @@ class GameServer:
         self.bigfont = pygame.font.SysFont("consolas", 32)
 
         # game state
+        self.round_time_default = round_time
+        self.reset_state()
+
+        # network
+        self.subscribers = []
+        self.client_threads = []
+        self.net_thread = None
+        self.lock = threading.Lock()
+        self.cmd_queue = []
+        self.running = True
+
+    # ----------------------------------------------
+    # New safe reset system (no __init__ call)
+    # ----------------------------------------------
+    def reset_state(self):
         self.phase = PHASE_SETUP
-        self.towers: List[Tower] = []
-        self.spawners: List[Spawner] = []
-        self.enemies: List[Enemy] = []
-        self.obstacles: List[pygame.Rect] = []
-        self.time_left = round_time
+        self.towers = []
+        self.spawners = []
+        self.enemies = []
+        self.time_left = self.round_time_default
+
         self.placement_mode = 0
         self.tower_counts = {1: 0, 2: 0}
         self.spawner_counts = {1: 0, 2: 0}
-        self.winner = None
-        self.gameover_timer = 0.0
         self.money = {1: 200, 2: 200}
+        self.winner = None
+        self.gameover_timer = 0
 
         self.pathfinder = Pathfinder(WIDTH, HEIGHT, PATH_GRID_SIZE)
+        self.obstacles = []
         self.generate_obstacles()
 
-        # networking
-        self.subscribers: List[socket.socket] = []
-        self.client_threads: List[ClientHandler] = []
-        self.net_thread: Optional[NetworkServer] = None
+    def enqueue(self, cmd):
+        with self.lock:
+            self.cmd_queue.append(cmd)
 
-        # thread-safe queue of commands from clients
-        self.lock = threading.Lock()
-        self.cmd_queue: List[Dict] = []
-        self.running = True
+    def process_commands(self):
+        with self.lock:
+            cmds = self.cmd_queue[:]
+            self.cmd_queue = []
 
+        for cmd in cmds:
+            t = cmd["type"]
+            if t == "buy_tower":
+                self._attempt_buy_tower(cmd["owner"], cmd["pos"], cmd["ttype"])
+            elif t == "place_spawner":
+                self._attempt_place_spawner(cmd["owner"], cmd["pos"])
+            elif t == "upgrade_tower":
+                self._attempt_upgrade_tower_at(cmd["pos"])
+            elif t == "start":
+                self.start_round()
+            elif t == "reset":
+                print("[HOST] RESET requested")
+                self.reset_state()
+
+    # ----------------------------------------------
+    # Attempt functions
+    # ----------------------------------------------
     def generate_obstacles(self):
         self.pathfinder.clear()
         self.obstacles = []
@@ -463,323 +468,304 @@ class GameServer:
             x = random.randint(margin, WIDTH - margin - w)
             y = random.randint(40, HEIGHT - 40 - h)
             r = pygame.Rect(x, y, w, h)
-            if r.colliderect(pygame.Rect(BASE_POS[0] - BASE_RADIUS - 40, BASE_POS[1] - BASE_RADIUS - 40, (BASE_RADIUS + 40) * 2, (BASE_RADIUS + 40) * 2)):
+            # keep clear of base
+            if r.colliderect(pygame.Rect(BASE_POS[0]-BASE_RADIUS-40,
+                                         BASE_POS[1]-BASE_RADIUS-40,
+                                         (BASE_RADIUS+40)*2,
+                                         (BASE_RADIUS+40)*2)):
                 continue
             self.obstacles.append(r)
             self.pathfinder.set_obstacle_rect(r)
 
-    def queue_command(self, cmd: Dict):
-        with self.lock:
-            self.cmd_queue.append(cmd)
-
-    def process_commands(self):
-        with self.lock:
-            queue = self.cmd_queue[:]
-            self.cmd_queue = []
-        for cmd in queue:
-            t = cmd.get("type")
-            if t == "buy_tower":
-                owner = cmd["owner"]; pos = cmd["pos"]; ttype = cmd.get("ttype", "basic")
-                self._attempt_buy_tower(owner, pos, ttype)
-            elif t == "place_spawner":
-                owner = cmd["owner"]; pos = cmd["pos"]
-                self._attempt_place_spawner(owner, pos)
-            elif t == "upgrade_tower":
-                pos = cmd["pos"]
-                self._attempt_upgrade_tower_at(pos)
-            elif t == "start":
-                self.start_round()
-            elif t == "reset":
-                self.reset()
-
-    # Attempt functions validate and mutate authoritative state
-    def _attempt_buy_tower(self, owner: int, pos: Tuple[int, int], ttype: str):
+    def _attempt_buy_tower(self, owner, pos, ttype):
         mx, my = pos
-        if dist((mx, my), BASE_POS) < BASE_RADIUS + 40:
+        if dist((mx,my), BASE_POS) < BASE_RADIUS + 40:
             return
-        if self.tower_counts.get(owner, 0) >= MAX_TOWERS_PER_PLAYER:
+        if self.tower_counts[owner] >= MAX_TOWERS_PER_PLAYER:
             return
+
         cost = TOWER_TYPES.get(ttype, TOWER_TYPES["basic"])["cost"]
-        if self.money.get(owner, 0) < cost:
+        if self.money[owner] < cost:
             return
+
         for t in self.towers:
-            if dist(t.pos, (mx, my)) < TOWER_RADIUS * 2:
+            if dist(t.pos, (mx,my)) < TOWER_RADIUS*2:
                 return
-        t = Tower(pos=(mx, my), owner=owner, ttype=ttype)
-        self.towers.append(t)
+
+        self.towers.append(Tower(pos=pos, owner=owner, ttype=ttype))
         self.tower_counts[owner] += 1
         self.money[owner] -= cost
         print(f"[HOST] BUY_TOWER owner={owner} pos={pos} type={ttype}")
 
-    def _attempt_place_spawner(self, owner: int, pos: Tuple[int, int]):
+    def _attempt_place_spawner(self, owner, pos):
         mx, my = pos
-        if dist((mx, my), BASE_POS) < BASE_RADIUS + 40:
+        if dist((mx,my), BASE_POS) < BASE_RADIUS + 40:
             return
-        if self.spawner_counts.get(owner, 0) >= MAX_SPAWNERS_PER_PLAYER:
+        if self.spawner_counts[owner] >= MAX_SPAWNERS_PER_PLAYER:
             return
         for s in self.spawners:
-            if dist(s.pos, (mx, my)) < 28:
+            if dist(s.pos, (mx,my)) < 28:
                 return
-        s = Spawner(pos=(mx, my), owner=owner, spawn_timer=random.uniform(0, 2))
-        self.spawners.append(s)
+        self.spawners.append(Spawner(pos=pos, owner=owner,
+                                     spawn_timer=random.uniform(0,2)))
         self.spawner_counts[owner] += 1
         print(f"[HOST] PLACE_SPAWNER owner={owner} pos={pos}")
 
-    def _attempt_upgrade_tower_at(self, pos: Tuple[int, int]):
+    def _attempt_upgrade_tower_at(self, pos):
         mx, my = pos
-        # find nearest tower within range
         nearest = None
         nd = 1e9
         for t in self.towers:
-            d = dist(t.pos, (mx, my))
+            d = dist(t.pos, (mx,my))
             if d < nd and d <= t.radius + 16:
-                nearest = t; nd = d
+                nearest = t
+                nd = d
+
         if not nearest:
             return
-        cost = TOWER_TYPES.get(nearest.ttype, TOWER_TYPES["basic"])["upgrade_cost"] * nearest.level
-        if self.money.get(nearest.owner, 0) < cost:
-            return
-        self.money[nearest.owner] -= cost
-        nearest.upgrade()
-        print(f"[HOST] UPGRADED tower at {nearest.pos} owner={nearest.owner} new_level={nearest.level}")
 
-    def start_network(self, host_ip: str, host_port: int):
+        cost = TOWER_TYPES[nearest.ttype]["upgrade_cost"] * nearest.level
+        owner = nearest.owner
+        if self.money[owner] < cost:
+            return
+
+        self.money[owner] -= cost
+        nearest.upgrade()
+        print(f"[HOST] UPGRADE tower at {nearest.pos} level={nearest.level}")
+
+    def start_network(self, host_ip, host_port):
         self.net_thread = NetworkServer(host_ip, host_port, self)
         self.net_thread.start()
 
     def start_round(self):
         if self.phase != PHASE_SETUP:
             return
-        if len(self.spawners) == 0:
-            s1 = Spawner(pos=(40, HEIGHT // 3), owner=1, spawn_timer=0.5)
-            s2 = Spawner(pos=(40, HEIGHT * 2 // 3), owner=2, spawn_timer=1.0)
-            self.spawners.extend([s1, s2])
+        if not self.spawners:
+            self.spawners.append(Spawner(pos=(40, HEIGHT//3), owner=1, spawn_timer=0.5))
+            self.spawners.append(Spawner(pos=(40, HEIGHT*2//3), owner=2, spawn_timer=1.0))
         self.phase = PHASE_RUNNING
-        self.time_left = max(1, self.time_left)
         print("[HOST] Round started")
 
-    def reset(self):
-        rt = self.time_left
-        with self.lock:
-            self.__init__(round_time=rt)
-
-    def update(self, dt: float):
-        # first process queued client commands
+    # ----------------------------------------------
+    # Update
+    # ----------------------------------------------
+    def update(self, dt):
         self.process_commands()
 
         if self.phase == PHASE_RUNNING:
-            for s in self.spawners:
-                s.update(dt, self.enemies, self.pathfinder)
-            for e in self.enemies:
-                e.update(dt, self.pathfinder)
-            # reward money for killed enemies
+            for s in self.spawners: s.update(dt, self.enemies, self.pathfinder)
+            for e in self.enemies: e.update(dt, self.pathfinder)
+
             survivors = []
             for e in self.enemies:
                 if e.hp <= 0:
                     reward = ENEMY_TYPES[e.etype]["reward"]
-                    self.money[1] += reward // 2
-                    self.money[2] += reward - (reward // 2)
+                    self.money[1] += reward//2
+                    self.money[2] += reward - reward//2
                 else:
                     survivors.append(e)
             self.enemies = survivors
-            for t in self.towers:
-                t.update(dt, self.enemies)
-            # check infiltration
+
+            for t in self.towers: t.update(dt, self.enemies)
+
             for e in self.enemies:
-                if dist((e.pos.x, e.pos.y), BASE_POS) <= BASE_RADIUS:
+                if dist((e.pos.x,e.pos.y), BASE_POS) <= BASE_RADIUS:
                     self.phase = PHASE_GAMEOVER
                     self.winner = "ENEMIES"
-                    self.gameover_timer = 0.0
-                    print("[HOST] ENEMIES WIN - infiltration")
+                    print("[HOST] ENEMIES WIN (infiltration)")
                     return
+
             self.time_left -= dt
             if self.time_left <= 0:
                 self.phase = PHASE_GAMEOVER
                 self.winner = "TOWERS"
-                self.gameover_timer = 0.0
-                print("[HOST] TOWERS WIN - timer elapsed")
+                print("[HOST] TOWERS WIN (timer)")
+
         elif self.phase == PHASE_GAMEOVER:
             self.gameover_timer += dt
 
-    # Build a JSON-serializable snapshot of state
+    # ----------------------------------------------
+    # Snapshot for subscribers
+    # ----------------------------------------------
     def build_snapshot(self):
         with self.lock:
-            snapshot = {
+            return {
                 "phase": self.phase,
                 "time_left": float(self.time_left),
                 "towers": [t.to_dict() for t in self.towers],
                 "spawners": [s.to_dict() for s in self.spawners],
                 "enemies": [e.to_dict() for e in self.enemies],
-                "money": {"1": int(self.money[1]), "2": int(self.money[2])},
-                "obstacles": [{"x": r.x, "y": r.y, "w": r.w, "h": r.h} for r in self.obstacles],
+                "money": {"1": self.money[1], "2": self.money[2]},
+                # FIXED rect fields
+                "obstacles": [
+                    {"x": r.x, "y": r.y, "w": r.width, "h": r.height}
+                    for r in self.obstacles
+                ],
                 "winner": self.winner or ""
             }
-            return snapshot
 
     def broadcast_loop(self, hz=10):
         interval = 1.0 / hz
         while self.running:
             snap = self.build_snapshot()
-            data = (json.dumps(snap) + "\n").encode("utf-8")
+            data = (json.dumps(snap) + "\n").encode()
             with self.lock:
                 subs = list(self.subscribers)
             for s in subs:
-                try:
-                    s.sendall(data)
-                except Exception:
+                try: s.sendall(data)
+                except:
                     with self.lock:
                         if s in self.subscribers:
-                            try:
-                                self.subscribers.remove(s)
-                                s.close()
-                            except:
-                                pass
+                            self.subscribers.remove(s)
+                    try: s.close()
+                    except: pass
             time.sleep(interval)
 
+    # ----------------------------------------------
+    # Run loop
+    # ----------------------------------------------
     def run(self, host_mode=False, host_ip="0.0.0.0", host_port=9999):
-        # start network server if requested
         if host_mode:
             self.start_network(host_ip, host_port)
-        # start broadcaster thread
-        broadcaster = threading.Thread(target=self.broadcast_loop, daemon=True)
-        broadcaster.start()
 
-        last_time = time.time()
+        threading.Thread(target=self.broadcast_loop, daemon=True).start()
+
+        last = time.time()
+
         try:
             while True:
                 now = time.time()
-                dt = now - last_time
-                last_time = now
+                dt = now - last
+                last = now
+
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         raise KeyboardInterrupt()
                     if event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_ESCAPE:
-                            raise KeyboardInterrupt()
-                        if event.key == pygame.K_r:
-                            self.reset()
-                        if event.key == pygame.K_1:
-                            self.placement_mode = 1
-                        if event.key == pygame.K_2:
-                            self.placement_mode = 2
-                        if event.key == pygame.K_3:
-                            self.placement_mode = 3
-                        if event.key == pygame.K_4:
-                            self.placement_mode = 4
+                        if event.key == pygame.K_ESCAPE: raise KeyboardInterrupt()
+                        if event.key == pygame.K_r: self.reset_state()
+                        if event.key == pygame.K_1: self.placement_mode = 1
+                        if event.key == pygame.K_2: self.placement_mode = 2
+                        if event.key == pygame.K_3: self.placement_mode = 3
+                        if event.key == pygame.K_4: self.placement_mode = 4
                         if event.key == pygame.K_RETURN:
                             if self.phase == PHASE_SETUP:
                                 self.start_round()
                             elif self.phase == PHASE_GAMEOVER:
-                                self.reset()
+                                self.reset_state()
                         if event.key == pygame.K_u:
-                            mx, my = pygame.mouse.get_pos()
-                            self._attempt_upgrade_tower_at((mx, my))
-                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                        mx, my = event.pos
-                        if self.placement_mode in (1, 2):
-                            # local buy (owner = placement_mode)
-                            # default to basic type unless T/G logic present locally
-                            # For local convenience, buy "basic"
-                            self.queue_command({"type": "buy_tower", "owner": self.placement_mode, "pos": (mx, my), "ttype": "basic"})
-                        elif self.placement_mode in (3, 4):
-                            self.queue_command({"type": "place_spawner", "owner": self.placement_mode - 2, "pos": (mx, my)})
+                            mx,my = pygame.mouse.get_pos()
+                            self._attempt_upgrade_tower_at((mx,my))
 
-                # update game
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        mx,my = event.pos
+                        if self.placement_mode in (1,2):
+                            self.enqueue({"type": "buy_tower",
+                                          "owner": self.placement_mode,
+                                          "pos": (mx,my),
+                                          "ttype": "basic"})
+                        elif self.placement_mode in (3,4):
+                            self.enqueue({"type": "place_spawner",
+                                          "owner": self.placement_mode-2,
+                                          "pos": (mx,my)})
+
                 self.update(dt)
-                # draw
                 self.draw()
                 pygame.display.flip()
                 self.clock.tick(60)
+
         except KeyboardInterrupt:
             print("Shutting down.")
         finally:
             self.running = False
-            if self.net_thread:
-                self.net_thread.stop()
+            if self.net_thread: self.net_thread.stop()
             with self.lock:
                 for t in self.client_threads:
-                    try:
-                        t.close()
-                    except:
-                        pass
+                    try: t.close()
+                    except: pass
                 for s in self.subscribers:
-                    try:
-                        s.close()
-                    except:
-                        pass
+                    try: s.close()
+                    except: pass
             pygame.quit()
 
+    # ----------------------------------------------
+    # Rendering
+    # ----------------------------------------------
     def draw(self):
-        self.screen.fill((34, 36, 48))
-        pygame.draw.line(self.screen, (60, 60, 80), (0, HEIGHT // 2), BASE_POS, 24)
+        self.screen.fill((34,36,48))
+        pygame.draw.line(self.screen,(60,60,80),(0,HEIGHT//2),BASE_POS,24)
+
         for r in self.obstacles:
-            pygame.draw.rect(self.screen, (90, 90, 100), r)
-        pygame.draw.circle(self.screen, (60, 200, 120), BASE_POS, BASE_RADIUS)
-        pygame.draw.circle(self.screen, (30, 160, 80), BASE_POS, BASE_RADIUS - 8)
-        base_text = self.font.render("BASE", True, BLACK)
-        self.screen.blit(base_text, (BASE_POS[0] - base_text.get_width() // 2, BASE_POS[1] - 10))
+            pygame.draw.rect(self.screen,(90,90,100),r)
+
+        pygame.draw.circle(self.screen,(60,200,120),BASE_POS,BASE_RADIUS)
+        pygame.draw.circle(self.screen,(30,160,80),BASE_POS,BASE_RADIUS-8)
+        text=self.font.render("BASE",True,BLACK)
+        self.screen.blit(text,(BASE_POS[0]-text.get_width()//2, BASE_POS[1]-10))
+
         for s in self.spawners:
-            color = ORANGE if s.owner == 1 else RED
-            pygame.draw.rect(self.screen, color, (s.pos[0] - 12, s.pos[1] - 12, 24, 24))
+            pygame.draw.rect(self.screen,
+                             ORANGE if s.owner==1 else RED,
+                             (s.pos[0]-12,s.pos[1]-12,24,24))
+
         for t in self.towers:
-            color = BLUE if t.owner == 1 else PURPLE
-            pygame.draw.circle(self.screen, color, (int(t.pos[0]), int(t.pos[1])), t.radius)
-            lvl = self.font.render(f"L{t.level}", True, WHITE)
-            self.screen.blit(lvl, (t.pos[0] - lvl.get_width() // 2, t.pos[1] - lvl.get_height() // 2))
+            pygame.draw.circle(self.screen,
+                               BLUE if t.owner==1 else PURPLE,
+                               (int(t.pos[0]),int(t.pos[1])),
+                               t.radius)
+            lvl=self.font.render(f"L{t.level}",True,WHITE)
+            self.screen.blit(lvl,(t.pos[0]-lvl.get_width()//2,
+                                  t.pos[1]-lvl.get_height()//2))
+
         for e in self.enemies:
-            pygame.draw.circle(self.screen, e.color, (int(e.pos.x), int(e.pos.y)), e.radius)
-            w = 22; h = 4
-            x = int(e.pos.x - w / 2); y = int(e.pos.y - e.radius - 10)
-            pygame.draw.rect(self.screen, RED, (x, y, w, h))
-            hp_w = max(0, int((e.hp / ENEMY_TYPES[e.etype]["hp"]) * w))
-            pygame.draw.rect(self.screen, GREEN, (x, y, hp_w, h))
-        # HUD
+            pygame.draw.circle(self.screen,e.color,(int(e.pos.x),int(e.pos.y)),e.radius)
+            w,h=22,4
+            x=int(e.pos.x - w/2)
+            y=int(e.pos.y - e.radius - 10)
+            pygame.draw.rect(self.screen,RED,(x,y,w,h))
+            hp_w=max(0,int((e.hp/ENEMY_TYPES[e.etype]["hp"])*w))
+            pygame.draw.rect(self.screen,GREEN,(x,y,hp_w,h))
+
         self.draw_hud()
 
     def draw_hud(self):
-        lines = [
+        lines=[
             "Controls:",
-            "1 - Tower P1 placement | 2 - Tower P2 placement",
-            "3 - Enemy E1 spawner placement | 4 - Enemy E2 spawner placement",
-            "Left-click to place (local BUY). U - upgrade tower under mouse",
-            "ENTER - Start | R - Reset | ESC - Quit",
+            "1/2 Tower P1/P2   | 3/4 Enemy Spawner E1/E2",
+            "Left-click place | U upgrade | Enter start/reset",
         ]
-        for i, l in enumerate(lines):
-            r = self.font.render(l, True, WHITE if i == 0 else GRAY)
-            self.screen.blit(r, (8, 8 + i * 18))
-        txt = self.font.render(f"Towers: P1={self.tower_counts[1]} P2={self.tower_counts[2]}  Spawners: E1={self.spawner_counts[1]} E2={self.spawner_counts[2]}  Enemies={len(self.enemies)}", True, WHITE)
-        self.screen.blit(txt, (8, HEIGHT - 60))
-        moneytxt = self.font.render(f"P1 Money: ${self.money[1]}   P2 Money: ${self.money[2]}", True, YELLOW)
-        self.screen.blit(moneytxt, (8, HEIGHT - 36))
-        rt_text = self.font.render(f"Time Left: {format_time(self.time_left)}", True, GREEN)
-        self.screen.blit(rt_text, (WIDTH // 2 - rt_text.get_width() // 2, 8))
+        for i,l in enumerate(lines):
+            r=self.font.render(l,True,WHITE if i==0 else GRAY)
+            self.screen.blit(r,(8,8+i*18))
 
+        txt=self.font.render(
+            f"Towers: P1={self.tower_counts[1]} P2={self.tower_counts[2]}   "
+            f"Spawners: E1={self.spawner_counts[1]} E2={self.spawner_counts[2]}   "
+            f"Enemies={len(self.enemies)}",
+            True,WHITE)
+        self.screen.blit(txt,(8,HEIGHT-60))
 
-def format_time(seconds: float) -> str:
-    if seconds < 0:
-        seconds = 0
-    m = int(seconds) // 60
-    s = int(seconds) % 60
-    return f"{m:02d}:{s:02d}"
+        money=self.font.render(
+            f"P1 Money ${self.money[1]}    P2 Money ${self.money[2]}",
+            True,YELLOW)
+        self.screen.blit(money,(8,HEIGHT-36))
 
+        rt=self.font.render(f"Time: {format_time(self.time_left)}",True,GREEN)
+        self.screen.blit(rt,(WIDTH//2 - rt.get_width()//2,8))
+
+def format_time(seconds):
+    seconds=max(0,int(seconds))
+    return f"{seconds//60:02d}:{seconds%60:02d}"
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", action="store_true", help="Run network host (accept remote clients)")
-    parser.add_argument("--port", type=int, default=9999, help="Port for network host")
-    parser.add_argument("--round-time", type=int, default=DEFAULT_ROUND_TIME, help="Round time in seconds")
-    args = parser.parse_args()
+    p=argparse.ArgumentParser()
+    p.add_argument("--host",action="store_true")
+    p.add_argument("--port",type=int,default=9999)
+    p.add_argument("--round-time",type=int,default=DEFAULT_ROUND_TIME)
+    args=p.parse_args()
 
-    server = GameServer(round_time=args.round_time)
-    try:
-        server.run(host_mode=args.host, host_ip="0.0.0.0", host_port=args.port)
-    except KeyboardInterrupt:
-        print("Exiting.")
-    finally:
-        server.running = False
-        if server.net_thread:
-            server.net_thread.stop()
+    server=GameServer(round_time=args.round_time)
+    server.run(host_mode=args.host, host_ip="0.0.0.0", host_port=args.port)
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
