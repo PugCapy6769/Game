@@ -1,35 +1,18 @@
-```markdown
 #!/usr/bin/env python3
-"""
-Networked GUI client that subscribes to the host's JSON state feed and renders it.
-Also provides a simple shop UI for buying towers and placing spawners.
-
-Run:
-    python net_client_gui.py --host HOST_IP --port 9999
-
-Controls:
-    Left-click: place selected item (BUY_TOWER or PLACE_SPAWNER) at click position (sends command)
-    1/2: set owner (player 1 or 2) for buy commands
-    T/G: cycle tower types
-    U: send UPGRADE_TOWER <x> <y> for tower under mouse
-    ENTER: send START
-    R: send RESET
-    ESC: quit
-"""
 import argparse
 import json
 import socket
 import threading
 import time
+import copy
 import pygame
 import sys
 
-# Default visuals (keep in sync with host constants for readability)
+# Visuals synced with host
 WIDTH, HEIGHT = 1000, 640
 BASE_POS = (WIDTH - 60, HEIGHT // 2)
 BASE_RADIUS = 36
 
-# Colors
 WHITE = (255, 255, 255)
 BLACK = (8, 8, 8)
 GRAY = (160, 160, 160)
@@ -40,9 +23,12 @@ YELLOW = (240, 200, 30)
 ORANGE = (245, 145, 30)
 PURPLE = (170, 80, 200)
 
-# Tower types shown in-shop
 TOWER_TYPES = ["basic", "sniper", "rapid"]
 
+
+# --------------------------------------------------
+# Client class
+# --------------------------------------------------
 class NetClientGUI:
     def __init__(self, host, port):
         pygame.init()
@@ -59,37 +45,42 @@ class NetClientGUI:
         self.state = {}
         self.state_lock = threading.Lock()
 
-        # shop / control
+        # controls
         self.owner = 1
         self.selected_tower_type = "basic"
         self.mode = "buy_tower"  # or "place_spawner"
         self.subscribed = False
 
+    # --------------------------------------------------
+    # Networking
+    # --------------------------------------------------
     def connect_and_subscribe(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             self.sock.connect((self.host, self.port))
-            # start receiver thread
             t = threading.Thread(target=self.receiver_loop, daemon=True)
             t.start()
-            # subscribe
             self.send_cmd("SUBSCRIBE")
             self.subscribed = True
-            print("[CLIENT] Subscribed to host state")
+            print("[CLIENT] Connected & Subscribed")
         except Exception as e:
-            print("Could not connect:", e)
+            print("Connection failed:", e)
             self.running = False
 
-    def send_cmd(self, txt: str):
+    def send_cmd(self, text):
         if not self.sock:
             return
         try:
-            self.sock.sendall((txt.strip() + "\n").encode("utf-8"))
+            self.sock.sendall((text.strip() + "\n").encode("utf-8"))
         except Exception as e:
             print("[CLIENT] send error:", e)
             self.running = False
 
     def receiver_loop(self):
+        """
+        The host guarantees single-line JSON frames ending with '\n'.
+        We keep framing simple but safe.
+        """
         buf = b""
         try:
             while self.running:
@@ -97,8 +88,10 @@ class NetClientGUI:
                 if not data:
                     break
                 buf += data
+
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
+                    line = line.strip()
                     if not line:
                         continue
                     try:
@@ -107,47 +100,53 @@ class NetClientGUI:
                         continue
                     with self.state_lock:
                         self.state = snap
-        except Exception:
+        except:
             pass
         finally:
-            print("[CLIENT] disconnected from host")
+            print("[CLIENT] disconnected")
             self.running = False
 
+    # --------------------------------------------------
+    # Main loop
+    # --------------------------------------------------
     def run(self):
         self.connect_and_subscribe()
+
         while self.running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
                     self.running = False
                     break
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
+                if ev.type == pygame.KEYDOWN:
+                    if ev.key == pygame.K_ESCAPE:
                         self.running = False
                         break
-                    if event.key == pygame.K_1:
+                    if ev.key == pygame.K_1:
                         self.owner = 1
-                    if event.key == pygame.K_2:
+                    if ev.key == pygame.K_2:
                         self.owner = 2
-                    if event.key == pygame.K_t:
+                    if ev.key == pygame.K_t:
                         idx = TOWER_TYPES.index(self.selected_tower_type)
                         self.selected_tower_type = TOWER_TYPES[(idx + 1) % len(TOWER_TYPES)]
-                    if event.key == pygame.K_g:
+                    if ev.key == pygame.K_g:
                         idx = TOWER_TYPES.index(self.selected_tower_type)
                         self.selected_tower_type = TOWER_TYPES[(idx - 1) % len(TOWER_TYPES)]
-                    if event.key == pygame.K_u:
+                    if ev.key == pygame.K_u:
                         mx, my = pygame.mouse.get_pos()
                         self.send_cmd(f"UPGRADE_TOWER {mx} {my}")
-                    if event.key == pygame.K_RETURN:
+                    if ev.key == pygame.K_RETURN:
                         self.send_cmd("START")
-                    if event.key == pygame.K_r:
+                    if ev.key == pygame.K_r:
                         self.send_cmd("RESET")
-                    if event.key == pygame.K_TAB:
-                        # toggle mode
+                    if ev.key == pygame.K_TAB:
                         self.mode = "place_spawner" if self.mode == "buy_tower" else "buy_tower"
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    mx, my = event.pos
+
+                if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                    mx, my = ev.pos
                     if self.mode == "buy_tower":
-                        self.send_cmd(f"BUY_TOWER {self.owner} {mx} {my} {self.selected_tower_type}")
+                        self.send_cmd(
+                            f"BUY_TOWER {self.owner} {mx} {my} {self.selected_tower_type}"
+                        )
                     else:
                         self.send_cmd(f"PLACE_SPAWNER {self.owner} {mx} {my}")
 
@@ -162,86 +161,124 @@ class NetClientGUI:
             pass
         pygame.quit()
 
+    # --------------------------------------------------
+    # Drawing
+    # --------------------------------------------------
     def draw(self):
         self.screen.fill((34, 36, 48))
-        # draw base path hint
+
         pygame.draw.line(self.screen, (60, 60, 80), (0, HEIGHT // 2), BASE_POS, 24)
-        # snapshot copy
+
         with self.state_lock:
-            snap = dict(self.state)
+            snap = copy.deepcopy(self.state)
+
         # obstacles
         for ob in snap.get("obstacles", []):
-            r = pygame.Rect(ob["x"], ob["y"], ob["w"], ob["h"])
-            pygame.draw.rect(self.screen, (90, 90, 100), r)
+            try:
+                r = pygame.Rect(int(ob["x"]), int(ob["y"]), int(ob["w"]), int(ob["h"]))
+                pygame.draw.rect(self.screen, (90, 90, 100), r)
+            except:
+                continue
+
         # base
         pygame.draw.circle(self.screen, (60, 200, 120), BASE_POS, BASE_RADIUS)
         pygame.draw.circle(self.screen, (30, 160, 80), BASE_POS, BASE_RADIUS - 8)
+
         # spawners
         for s in snap.get("spawners", []):
-            color = ORANGE if s["owner"] == 1 else RED
-            pygame.draw.rect(self.screen, color, (s["x"] - 12, s["y"] - 12, 24, 24))
+            try:
+                sx = int(s["x"])
+                sy = int(s["y"])
+                color = ORANGE if s["owner"] == 1 else RED
+                pygame.draw.rect(self.screen, color, (sx - 12, sy - 12, 24, 24))
+            except:
+                continue
+
         # towers
         for t in snap.get("towers", []):
-            color = BLUE if t["owner"] == 1 else PURPLE
-            pygame.draw.circle(self.screen, color, (int(t["x"]), int(t["y"])), 16)
-            lvl = self.font.render(f"L{t.get('level',1)}", True, WHITE)
-            self.screen.blit(lvl, (int(t["x"]) - lvl.get_width()//2, int(t["y"]) - lvl.get_height()//2))
+            try:
+                tx, ty = int(t["x"]), int(t["y"])
+                color = BLUE if t["owner"] == 1 else PURPLE
+                pygame.draw.circle(self.screen, color, (tx, ty), 16)
+                lvl = self.font.render(f"L{t.get('level',1)}", True, WHITE)
+                self.screen.blit(lvl, (tx - lvl.get_width()//2, ty - lvl.get_height()//2))
+            except:
+                continue
+
         # enemies
         for e in snap.get("enemies", []):
-            etype = e.get("etype", "basic")
-            color = (255, 120, 80)
-            if etype == "fast":
-                color = (255, 200, 60)
-            elif etype == "armored":
-                color = (200, 200, 220)
-            pygame.draw.circle(self.screen, color, (int(e["x"]), int(e["y"])), 10)
-            # hp bar
-            w = 22; h = 4
-            x = int(e["x"] - w / 2); y = int(e["y"] - 10 - 10)
-            pygame.draw.rect(self.screen, RED, (x, y, w, h))
-            maxhp = 30
-            if etype in ("fast",):
-                maxhp = 18
-            if etype in ("armored",):
-                maxhp = 70
-            hpw = max(0, int((e.get("hp",0) / maxhp) * w))
-            pygame.draw.rect(self.screen, GREEN, (x, y, hpw, h))
-        # HUD / shop
+            try:
+                ex, ey = int(e["x"]), int(e["y"])
+                etype = e.get("etype", "basic")
+                color = (255, 120, 80)
+                if etype == "fast":
+                    color = (255, 200, 60)
+                elif etype == "armored":
+                    color = (200, 200, 220)
+                pygame.draw.circle(self.screen, color, (ex, ey), 10)
+
+                # hp bar
+                w = 22
+                h = 4
+                x = ex - w // 2
+                y = ey - 10 - 10
+                pygame.draw.rect(self.screen, RED, (x, y, w, h))
+                maxhp = 30
+                if etype == "fast":
+                    maxhp = 18
+                if etype == "armored":
+                    maxhp = 70
+                hpw = max(0, int((e.get("hp", 0) / maxhp) * w))
+                pygame.draw.rect(self.screen, GREEN, (x, y, hpw, h))
+            except:
+                continue
+
         self.draw_ui(snap)
 
     def draw_ui(self, snap):
-        # top-left instructions
         lines = [
-            f"Mode: {'BUY TOWER' if self.mode=='buy_tower' else 'PLACE SPAWNER'} (TAB to toggle)",
-            f"Owner: {self.owner} (press 1 or 2)",
-            f"Tower type: {self.selected_tower_type} (T/G to cycle)",
-            "Left-click to place. U to upgrade tower under mouse. ENTER to start. R to reset.",
+            f"Mode: {'BUY TOWER' if self.mode=='buy_tower' else 'PLACE SPAWNER'} (TAB)",
+            f"Owner: {self.owner} (1/2)",
+            f"Tower type: {self.selected_tower_type} (T/G)",
+            "Left-click place | U upgrade | ENTER start | R reset",
         ]
         for i, l in enumerate(lines):
-            r = self.font.render(l, True, WHITE if i == 0 else GRAY)
+            col = WHITE if i == 0 else GRAY
+            r = self.font.render(l, True, col)
             self.screen.blit(r, (8, 8 + i * 18))
-        money = snap.get("money", {"1":0,"2":0})
-        moneytxt = self.font.render(f"P1 Money: ${money.get('1',0)}   P2 Money: ${money.get('2',0)}", True, YELLOW)
-        self.screen.blit(moneytxt, (8, HEIGHT - 36))
-        rt = snap.get("time_left", 0.0)
-        rt_text = self.font.render(f"Time Left: {int(rt)//60:02d}:{int(rt)%60:02d}", True, GREEN)
-        self.screen.blit(rt_text, (WIDTH // 2 - rt_text.get_width() // 2, 8))
-        # winner
+
+        money = snap.get("money", {"1": 0, "2": 0})
+        mtxt = self.font.render(
+            f"P1 Money: ${money.get('1',0)}   P2 Money: ${money.get('2',0)}",
+            True, YELLOW)
+        self.screen.blit(mtxt, (8, HEIGHT - 36))
+
+        rt = int(snap.get("time_left", 0))
+        rt_text = self.font.render(
+            f"Time Left: {rt//60:02d}:{rt%60:02d}",
+            True, GREEN)
+        self.screen.blit(rt_text, (WIDTH//2 - rt_text.get_width()//2, 8))
+
         winner = snap.get("winner", "")
         if winner:
             msg = "TOWERS WIN!" if winner == "TOWERS" else "ENEMIES WIN!"
-            header = self.bigfont.render(msg, True, GREEN if winner=="TOWERS" else RED)
-            self.screen.blit(header, (WIDTH//2 - header.get_width()//2, HEIGHT//2 - 20))
+            col = GREEN if winner == "TOWERS" else RED
+            h = self.bigfont.render(msg, True, col)
+            self.screen.blit(h, (WIDTH//2 - h.get_width()//2, HEIGHT//2 - 20))
 
 
+# --------------------------------------------------
+# Entry
+# --------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", required=True, help="Host IP")
-    parser.add_argument("--port", type=int, default=9999)
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--host", required=True)
+    p.add_argument("--port", type=int, default=9999)
+    args = p.parse_args()
 
     client = NetClientGUI(args.host, args.port)
     client.run()
+
 
 if __name__ == "__main__":
     main()
