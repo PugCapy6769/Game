@@ -60,9 +60,3 @@ Client commands (text protocol)
 - UPGRADE_TOWER <x> <y>
 - START
 - RESET
-
-Common CLI options
-
-- --host           Start the authoritative host (server) instead of only local play.
-- --port <port>    Port to listen on for client connections (default: 9999 in examples).
-- --round-time <s> Configure round time in seconds (default: 180).
