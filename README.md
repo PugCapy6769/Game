@@ -1,44 +1,59 @@
-```markdown
 # 2v2 Tower Defense (Host + Network Clients) - Python / Pygame
 
 Overview
-- Local + networked 2v2 tower defense.
-- Two players place towers; two other players place enemy spawners.
-- After setup, a timer runs (configurable). If any enemy reaches the base before the timer ends, enemies win; otherwise towers win.
-- Features:
-  - Money/cost/upgrade mechanics, multiple tower types, multiple enemy types.
-  - Obstacles and A* pathfinding so enemies navigate around obstacles.
-  - Authoritative host with client subscription: clients can BUY towers, PLACE spawners, UPGRADE towers, START and RESET.
-  - Host broadcasts full game state as newline-delimited JSON snapshots (~10Hz).
-  - A GUI network client (separate file) can subscribe and render the authoritative state and offer an in-game shop UI.
+
+A lightweight 2v2 tower defense game with an authoritative host and optional networked clients. Two players place towers while two others place enemy spawners; the host runs the simulation and validates client actions.
+
+Features
+
+- Local and networked 2v2 tower defense gameplay.
+- Multiple tower types, enemy types, money/cost/upgrade mechanics.
+- Obstacles with A* pathfinding so enemies navigate around blocked tiles.
+- Authoritative host that validates BUY/PLACE/UPGRADE commands; clients are thin controllers.
+- Host broadcasts full game state as newline-delimited JSON snapshots (~10 Hz).
+- A GUI network client (net_client_gui.py) can subscribe to the host and render live state with a shop UI.
 
 Files
-- main.py            - Host / authoritative game (also renders locally)
-- net_client_gui.py  - Networked GUI client (renders state, sends buy/upgrade commands)
+
+- main.py            - Host / authoritative game server (also renders locally)
+- net_client_gui.py  - Networked GUI client (renders host state, sends buy/upgrade commands)
 - net_client.py      - Simple text client for scripted placement/control
 
 Requirements
+
 - Python 3.8+
 - pygame
-  - Install: `pip install pygame`
 
-Quick start (local only)
-1. Run host locally (no networking):
-   ```
-   python main.py
-   ```
-2. Use the local controls to place towers/spawners and start the round.
+Install
 
-Host with network for remote clients
-1. Start host with network enabled:
-   ```
-   python main.py --host --port 9999
-   ```
+```bash
+pip install -r requirements.txt  # or: pip install pygame
+```
+
+Quick start — Local (no networking)
+
+1. Run the host locally (no network):
+
+```bash
+python main.py
+```
+
+2. Use local controls to place towers/spawners and start the round.
+
+Host with networking (remote clients)
+
+1. Start the host in network mode (example port 9999):
+
+```bash
+python main.py --host --port 9999
+```
+
 2. Remote clients can connect:
-   - Use `net_client.py` for a text-based client (scripted).
-   - Use `net_client_gui.py` for a GUI client that renders live state and provides shop UI.
+- Use net_client.py for a text-based/scripted client.
+- Use net_client_gui.py for a GUI client that renders live state and offers a shop UI.
 
-Client commands (text lines)
+Client commands (text protocol)
+
 - SUBSCRIBE
 - BUY_TOWER <owner> <x> <y> <type>
 - PLACE_SPAWNER <owner> <x> <y>
@@ -46,16 +61,21 @@ Client commands (text lines)
 - START
 - RESET
 
+Common CLI options
+
+- --host           Start the authoritative host (server) instead of only local play.
+- --port <port>    Port to listen on for client connections (default: 9999 in examples).
+- --round-time <s> Configure round time in seconds (default: 180).
+
 Notes
-- The host is authoritative: it validates all buys/upgrades/placements. Clients are thin controllers.
-- To make clients fully interactive with local prediction, we would need a richer protocol and conflict resolution; this project keeps authority on the host to avoid cheating.
-- Default round time is 180 seconds (3 minutes) for quicker testing. Use `--round-time 600` for 10-minute matches.
 
-If you'd like, I can:
-- Add persistent maps and a map editor.
-- Add per-player lobby and authentication.
-- Implement rich client-side rendering (animations, sprites).
-- Expand matchmaking and authoritative replay recording.
+- The host is authoritative: it validates and executes all buys, upgrades, and placements to prevent cheating.
+- The network protocol is intentionally simple: host snapshots are authoritative and clients act as controllers.
 
-Enjoy!
-```
+Contributing
+
+Contributions are welcome. Useful additions include persistent maps, a map editor, a lobby system, richer client-side prediction, or improved graphics and animations.
+
+License
+
+Specify your license here (e.g., MIT).
